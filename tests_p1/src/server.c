@@ -6,11 +6,10 @@
 #include <ctype.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-
 #include "protocol.h"
 
 // ---- Configurar credencial esperada (ejemplo) ----
-static const char *VALID_CREDENTIAL = "grupoXX";   // TODO: reemplazar por la real
+static const char *VALID_CREDENTIAL = "TEST";   // TODO: reemplazar por la real
 
 // ---- Array global de estados de clientes ----
 static client_state_t clients[MAX_CLIENTS];
@@ -166,10 +165,10 @@ static void handle_wrq(int sockfd,
         return;
     }
 
-    // Solo ASCII
+    // Solo ASCII (sin usar isascii)
     for (size_t i = 0; i < fname_len; ++i) {
         unsigned char c = (unsigned char)fname[i];
-        if (!isascii(c)) {
+        if (c > 127) {
             send_ack(sockfd, addr, addrlen, seq, "Filename no ASCII");
             fprintf(stderr, "WRQ: filename '%s' contiene no-ASCII\n", fname);
             return;
