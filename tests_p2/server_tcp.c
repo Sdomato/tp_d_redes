@@ -1,135 +1,120 @@
-#include "common.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <sys/time.h>
 
-// Prototipo de la función que maneja la conexión con el cliente
-void handle_client(int connfd);
+#define PORT 20252
+#define MAX_PDU 1009       // Máximo tamaño esperado de una PDU
+#define BUFFER_SIZE 3000   // Buffer acumulador
 
-// Función para evitar la creación de procesos zombies (obligatorio al usar fork)
-void sigchld_handler(int s) {
-    // waitpid() puede fallar si no hay hijos que esperar.
-    // Usamos el flag WNOHANG para que no se bloquee y maneje todos los zombies.
-    while (waitpid(-1, NULL, WNOHANG) > 0);
-}
-
-int main(int argc, char *argv[]) {
-    int listenfd, connfd;
+int main() {
+    int sockfd, connfd;
     struct sockaddr_in servaddr, cliaddr;
-    socklen_t clilen;
-    
-    // Configurar el handler de señales para evitar procesos zombie
-    struct sigaction sa;
-    sa.sa_handler = sigchld_handler; 
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-        perror("sigaction");
-        exit(EXIT_FAILURE);
-    }
-    
-    // 1. Crear el socket (TCP: SOCK_STREAM)
-    listenfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenfd < 0) {
-        perror("socket");
-        exit(EXIT_FAILURE);
+    socklen_t clilen = sizeof(cliaddr);
+
+    uint8_t buffer[BUFFER_SIZE];
+    size_t buffer_len = 0;
+
+    FILE *csv = fopen("delays.csv", "w");
+    if (!csv) {
+        perror("fopen CSV");
+        return 1;
     }
 
-    // Opcional: Reutilizar la dirección rápidamente (útil durante el desarrollo)
-    int optval = 1;
-    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) { perror("socket"); exit(1); }
 
-    // Configurar dirección del servidor
     memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
-    // Escuchar en todas las interfaces disponibles
-    servaddr.sin_addr.s_addr = htonl(INADDR_ANY); 
-    servaddr.sin_port = htons(SERVER_PORT);
+    servaddr.sin_addr.s_addr = INADDR_ANY;
+    servaddr.sin_port = htons(PORT);
 
-    // 2. Enlazar (bind) el socket a la dirección y puerto
-    if (bind(listenfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
+    if (bind(sockfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
         perror("bind");
-        close(listenfd);
-        exit(EXIT_FAILURE);
+        exit(1);
     }
 
-    // 3. Poner el socket en modo de escucha (listen)
-    if (listen(listenfd, BACKLOG) < 0) {
+    if (listen(sockfd, 1) < 0) {
         perror("listen");
-        close(listenfd);
-        exit(EXIT_FAILURE);
+        exit(1);
     }
 
-    printf("Servidor TCP escuchando en puerto %d...\n", SERVER_PORT);
+    printf("Servidor TCP escuchando en puerto %d...\n", PORT);
+    connfd = accept(sockfd, (struct sockaddr *)&cliaddr, &clilen);
+    if (connfd < 0) {
+        perror("accept");
+        exit(1);
+    }
 
-    // Bucle principal para aceptar conexiones
-    for (;;) {
-        clilen = sizeof(cliaddr);
-        
-        // 4. Aceptar la conexión entrante
-        connfd = accept(listenfd, (struct sockaddr *)&cliaddr, &clilen);
-        if (connfd < 0) {
-            // Manejar interrupciones o errores
-            if (errno == EINTR) continue; 
-            perror("accept");
+    printf("Conexión aceptada de %s:%d\n",
+            inet_ntoa(cliaddr.sin_addr), ntohs(cliaddr.sin_port));
+
+    int count = 1;
+
+    while (1) {
+        uint8_t recvbuf[1500];
+        ssize_t n = read(connfd, recvbuf, sizeof(recvbuf));
+
+        if (n < 0) {
+            perror("read");
+            break;
+        }
+        if (n == 0) {
+            printf("Cliente cerró la conexión.\n");
+            break;
+        }
+
+        // Copiar lo leído al buffer acumulador
+        if (buffer_len + n > BUFFER_SIZE) {
+            // buffer overflow → limpiar
+            buffer_len = 0;
             continue;
         }
 
-        char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &(cliaddr.sin_addr), client_ip, INET_ADDRSTRLEN);
-        printf("Conexión aceptada de %s:%d\n", client_ip, ntohs(cliaddr.sin_port));
+        memcpy(buffer + buffer_len, recvbuf, n);
+        buffer_len += n;
 
-        // 5. Crear un proceso hijo para manejar la conexión (concurrencia)
-        pid_t pid = fork();
-
-        if (pid == -1) {
-            perror("fork");
-            close(connfd); // Si fork falla, cerramos la conexión y seguimos
-        } else if (pid == 0) { 
-            // Proceso HIJO: Maneja la conexión
-            close(listenfd); // El hijo no necesita escuchar
-            handle_client(connfd);
-            close(connfd);  // Cerrar el socket de conexión
-            printf("Proceso hijo finalizado (%s:%d).\n", client_ip, ntohs(cliaddr.sin_port));
-            exit(EXIT_SUCCESS);
-        } else { 
-            // Proceso PADRE: Sigue escuchando
-            close(connfd); // El padre no necesita el socket de conexión del cliente
-        }
-    }
-
-    // Esta parte nunca se alcanza, pero se incluye por completitud
-    close(listenfd);
-    return EXIT_SUCCESS;
-}
-
-/**
- * Función que recibe el archivo de 1MB del cliente
- * @param connfd: Socket conectado al cliente.
- */
-void handle_client(int connfd) {
-    ssize_t n_read;
-    long total_read = 0;
-    char buffer[BUFFER_SIZE];
-
-    // Bucle de recepción de datos hasta que el cliente cierre la conexión
-    while (total_read < TOTAL_BYTES_1MB) {
-        n_read = recv(connfd, buffer, BUFFER_SIZE, 0);
-
-        if (n_read < 0) {
-            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
-                continue; // Reintentar
+        // Buscar delimitadores |
+        size_t pos = 0;
+        while (pos < buffer_len) {
+            if (buffer[pos] != '|') {
+                pos++;
+                continue;
             }
-            perror("recv error");
-            break;
-        } else if (n_read == 0) {
-            // Cliente cerró la conexión
-            printf("Cliente cerró la conexión inesperadamente. Bytes recibidos: %ld\n", total_read);
-            break;
+
+            size_t pdu_len = pos + 1;
+
+            if (pdu_len < 9) {
+                memmove(buffer, buffer + pos + 1, buffer_len - (pos + 1));
+                buffer_len -= (pos + 1);
+                break;
+            }
+
+            uint64_t origin_ts;
+            memcpy(&origin_ts, buffer, sizeof(uint64_t));
+
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            uint64_t dst_ts = (uint64_t)tv.tv_sec * 1000000ULL + tv.tv_usec;
+
+            double delay_sec = (dst_ts - origin_ts) / 1000000.0;
+
+            fprintf(csv, "%d,%.6f\n", count++, delay_sec);
+            fflush(csv);
+
+            size_t remaining = buffer_len - pdu_len;
+            memmove(buffer, buffer + pdu_len, remaining);
+            buffer_len = remaining;
+            pos = 0;
         }
-        
-        // Simplemente contamos los bytes, no es necesario escribirlos en disco
-        total_read += n_read;
     }
 
-    if (total_read >= TOTAL_BYTES_1MB) {
-        printf("Archivo (1MB) recibido completamente. Total: %ld bytes\n", total_read);
-    }
+    fclose(csv);
+    close(connfd);
+    close(sockfd);
+    return 0;
 }
