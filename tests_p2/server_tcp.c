@@ -8,10 +8,10 @@
 #include <sys/time.h>
 
 #define PORT 20252
-#define MAX_PDU 1009       // Máximo tamaño esperado de una PDU
-#define BUFFER_SIZE 3000   // Buffer acumulador
+#define MAX_PDU      1009      // Máximo tamaño esperado de una PDU
+#define BUFFER_SIZE  3000      // Buffer acumulador
 
-int main() {
+int main(void) {
     int sockfd, connfd;
     struct sockaddr_in servaddr, cliaddr;
     socklen_t clilen = sizeof(cliaddr);
@@ -26,20 +26,28 @@ int main() {
     }
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) { perror("socket"); exit(1); }
+    if (sockfd < 0) {
+        perror("socket");
+        fclose(csv);
+        exit(1);
+    }
 
     memset(&servaddr, 0, sizeof(servaddr));
-    servaddr.sin_family = AF_INET;
+    servaddr.sin_family      = AF_INET;
     servaddr.sin_addr.s_addr = INADDR_ANY;
-    servaddr.sin_port = htons(PORT);
+    servaddr.sin_port        = htons(PORT);
 
     if (bind(sockfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
         perror("bind");
+        close(sockfd);
+        fclose(csv);
         exit(1);
     }
 
     if (listen(sockfd, 1) < 0) {
         perror("listen");
+        close(sockfd);
+        fclose(csv);
         exit(1);
     }
 
@@ -47,11 +55,13 @@ int main() {
     connfd = accept(sockfd, (struct sockaddr *)&cliaddr, &clilen);
     if (connfd < 0) {
         perror("accept");
+        close(sockfd);
+        fclose(csv);
         exit(1);
     }
 
     printf("Conexión aceptada de %s:%d\n",
-            inet_ntoa(cliaddr.sin_addr), ntohs(cliaddr.sin_port));
+           inet_ntoa(cliaddr.sin_addr), ntohs(cliaddr.sin_port));
 
     int count = 1;
 
@@ -70,46 +80,48 @@ int main() {
 
         // Copiar lo leído al buffer acumulador
         if (buffer_len + n > BUFFER_SIZE) {
-            // buffer overflow → limpiar
+            // overflow del buffer → limpiamos y seguimos
             buffer_len = 0;
             continue;
         }
 
         memcpy(buffer + buffer_len, recvbuf, n);
-        buffer_len += n;
+        buffer_len += (size_t)n;
 
-        // Buscar delimitadores |
-        size_t pos = 0;
-        while (pos < buffer_len) {
-            if (buffer[pos] != '|') {
-                pos++;
-                continue;
-            }
-
-            size_t pdu_len = pos + 1;
-
-            if (pdu_len < 9) {
-                memmove(buffer, buffer + pos + 1, buffer_len - (pos + 1));
-                buffer_len -= (pos + 1);
+        // Procesar todas las PDUs completas que tengamos en el buffer
+        // Formato esperado: [8 bytes timestamp][payload...]['|']
+        while (buffer_len >= 9) {  // al menos timestamp (8) + '|'
+            // Buscamos el delimitador '|' *después* de los 8 bytes de timestamp
+            void *delim_ptr = memchr(buffer + 8, '|', buffer_len - 8);
+            if (!delim_ptr) {
+                // Todavía no llegó el delimitador: esperamos más datos
                 break;
             }
 
-            uint64_t origin_ts;
-            memcpy(&origin_ts, buffer, sizeof(uint64_t));
+            size_t pos     = (uint8_t *)delim_ptr - buffer;
+            size_t pdu_len = pos + 1;  // incluye el '|'
 
+            // Extraer timestamp de origen desde el comienzo de la PDU
+            uint64_t origin_ts;
+            memcpy(&origin_ts, buffer, sizeof(origin_ts));
+
+            // Timestamp de llegada
             struct timeval tv;
             gettimeofday(&tv, NULL);
-            uint64_t dst_ts = (uint64_t)tv.tv_sec * 1000000ULL + tv.tv_usec;
+            uint64_t dst_ts = (uint64_t)tv.tv_sec * 1000000ULL
+                            + (uint64_t)tv.tv_usec;
 
-            double delay_sec = (dst_ts - origin_ts) / 1000000.0;
+            // Usar tipo con signo para evitar overflow de uint64_t
+            int64_t diff_us = (int64_t)dst_ts - (int64_t)origin_ts;
+            double delay_sec = diff_us / 1000000.0;
 
             fprintf(csv, "%d,%.6f\n", count++, delay_sec);
             fflush(csv);
 
+            // Desplazar el buffer, removiendo la PDU ya procesada
             size_t remaining = buffer_len - pdu_len;
             memmove(buffer, buffer + pdu_len, remaining);
             buffer_len = remaining;
-            pos = 0;
         }
     }
 
@@ -118,3 +130,4 @@ int main() {
     close(sockfd);
     return 0;
 }
+
