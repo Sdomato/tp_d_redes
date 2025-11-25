@@ -9,7 +9,7 @@
 
 #define PORT 20252
 #define MAX_PDU      1009
-#define BUFFER_SIZE  50000   // Ampliado para evitar overflow
+#define BUFFER_SIZE  50000   
 
 int main(void) {
     int sockfd, connfd;

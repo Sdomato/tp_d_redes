@@ -8,6 +8,21 @@
 
 #define PORT 20252
 
+// -----------------------------
+//   ENVÍA TODOS LOS BYTES
+// -----------------------------
+ssize_t send_all(int sockfd, const void *buf, size_t len) {
+    size_t total_sent = 0;
+    const uint8_t *p = buf;
+
+    while (total_sent < len) {
+        ssize_t n = send(sockfd, p + total_sent, len - total_sent, 0);
+        if (n <= 0) return n;   // error
+        total_sent += n;
+    }
+    return total_sent;  // == len
+}
+
 uint64_t get_timestamp_us() {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -16,8 +31,7 @@ uint64_t get_timestamp_us() {
 
 int main(int argc, char *argv[]) {
     if (argc != 4) {
-        printf("Uso: %s <server_ip> -d <ms> -N <segundos>\n", argv[0]);
-        printf("Ejemplo: %s 192.168.0.10 50 10\n", argv[0]);
+        printf("Uso: %s <server_ip> <d_ms> <N_seconds>\n", argv[0]);
         return 1;
     }
 
@@ -54,17 +68,17 @@ int main(int argc, char *argv[]) {
             break;
 
         uint64_t origin = get_timestamp_us();
-        send(sockfd, &origin, sizeof(origin), 0);
+        send_all(sockfd, &origin, sizeof(origin));
 
         int payload_len = 500 + rand() % 501;
         uint8_t *payload = malloc(payload_len);
         memset(payload, 0x20, payload_len);
 
-        send(sockfd, payload, payload_len, 0);
+        send_all(sockfd, payload, payload_len);
         free(payload);
 
         uint8_t delim = '|';
-        send(sockfd, &delim, 1, 0);
+        send_all(sockfd, &delim, 1);
 
         usleep(d_ms * 1000);
     }
